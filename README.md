@@ -10,8 +10,8 @@ ALSA sequencer -> CC Scout core -> GTK source list
 
 ## Build and run
 
-On Ubuntu, install `build-essential cmake pkg-config libgtk-4-dev libadwaita-1-dev libasound2-dev`.
-On Arch Linux, install `base-devel cmake pkgconf gtk4 libadwaita alsa-lib`.
+On Ubuntu, install `build-essential cmake pkg-config libgtk-4-dev libadwaita-1-dev libasound2-dev libglib2.0-dev-bin libyaml-dev`.
+On Arch Linux, install `base-devel cmake pkgconf gtk4 libadwaita alsa-lib glib2-devel libyaml`.
 The app needs GTK 4.6 or newer and libadwaita 1.4 or newer.
 
 Keep the core checkout at `../cc-scout`, or pass
@@ -27,6 +27,13 @@ Connect the MPK mini IV before or after launching. CC Scout automatically
 monitors its main MIDI and DAW ports as one device. Open Settings from the
 header bar to monitor another ALSA client. The choice lasts for the current
 session.
+
+The MPK mini IV pad grid follows the DAW preset's note mapping on MIDI
+channel 10. Notes 36-43 (Bank A) and 44-51 (Bank B) share the eight
+physical positions. Mirrored messages light one tile and remain separate
+in the raw feed. Edit `presets/akai-mpk-mini-iv.yaml` and rebuild to match a custom
+preset. The YAML supplies port names, MIDI channels, pad notes, and the names
+used by Learn All Knobs.
 
 ## MIDI Learn
 

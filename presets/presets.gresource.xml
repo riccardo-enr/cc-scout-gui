@@ -1,0 +1,5 @@
+<gresources>
+  <gresource prefix="/io/github/riccardo_enr/CCScoutGui/presets">
+    <file>akai-mpk-mini-iv.yaml</file>
+  </gresource>
+</gresources>

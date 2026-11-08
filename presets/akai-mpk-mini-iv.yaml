@@ -1,0 +1,13 @@
+client: MPK mini IV
+ports:
+  midi: MPK mini IV MIDI Port
+  daw: MPK mini IV DAW Port
+key_channel: 1
+pads:
+  channel: 10
+  bank_a: [36, 37, 38, 39, 40, 41, 42, 43]
+  bank_b: [44, 45, 46, 47, 48, 49, 50, 51]
+knobs:
+  channel: 1
+  known_ccs: [24, 25]
+  names: [Division, Swing, Mode, Oct, Latch, Sync, Gate, BPM]
