@@ -27,7 +27,7 @@ add_custom_command(OUTPUT "${PRESET_RESOURCE}"
     VERBATIM)
 
 add_executable(cc-scout-gui
-    src/main.c src/device_profile.c src/midi_learn.c src/pad_grid.c
+    src/main.c src/device_profile.c src/knob_grid.c src/midi_learn.c src/pad_grid.c
     "${PRESET_RESOURCE}")
 target_link_libraries(cc-scout-gui PRIVATE
     CCScout::core PkgConfig::GTK4 PkgConfig::ADWAITA PkgConfig::YAML)

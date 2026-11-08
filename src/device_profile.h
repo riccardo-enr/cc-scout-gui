@@ -18,7 +18,7 @@ typedef struct {
   unsigned int pad_channel;
   unsigned int knob_channel;
   unsigned int pad_notes[PAD_COUNT * PAD_BANK_COUNT];
-  gboolean knob_ccs[MIDI_VALUE_COUNT];
+  unsigned int knob_ccs[KNOB_COUNT];
   char *knob_names[KNOB_COUNT];
 } device_profile;
 

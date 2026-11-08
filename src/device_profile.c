@@ -61,28 +61,28 @@ static gboolean read_pads(yaml_document_t *doc, yaml_node_t *node,
 static gboolean read_knobs(yaml_document_t *doc, yaml_node_t *knobs,
                            device_profile *profile) {
   yaml_node_t *names = member(doc, knobs, "names");
-  yaml_node_t *ccs = member(doc, knobs, "known_ccs");
+  yaml_node_t *ccs = member(doc, knobs, "ccs");
   if (!names || names->type != YAML_SEQUENCE_NODE ||
       names->data.sequence.items.top - names->data.sequence.items.start !=
           KNOB_COUNT ||
-      !ccs || ccs->type != YAML_SEQUENCE_NODE) {
+      !ccs || ccs->type != YAML_SEQUENCE_NODE ||
+      ccs->data.sequence.items.top - ccs->data.sequence.items.start !=
+          KNOB_COUNT) {
     return FALSE;
   }
+  gboolean seen[MIDI_VALUE_COUNT] = {FALSE};
   for (int i = 0; i < KNOB_COUNT; ++i) {
     profile->knob_names[i] = read_name(
         yaml_document_get_node(doc, names->data.sequence.items.start[i]));
-    if (!profile->knob_names[i]) {
+    unsigned int *cc = &profile->knob_ccs[i];
+    if (!profile->knob_names[i] ||
+        !read_number(
+            yaml_document_get_node(doc, ccs->data.sequence.items.start[i]), 0,
+            MIDI_VALUE_COUNT - 1, cc) ||
+        seen[*cc]) {
       return FALSE;
     }
-  }
-  for (yaml_node_item_t *item = ccs->data.sequence.items.start;
-       item < ccs->data.sequence.items.top; ++item) {
-    unsigned int cc;
-    if (!read_number(yaml_document_get_node(doc, *item), 0,
-                     MIDI_VALUE_COUNT - 1, &cc)) {
-      return FALSE;
-    }
-    profile->knob_ccs[cc] = TRUE;
+    seen[*cc] = TRUE;
   }
   return TRUE;
 }

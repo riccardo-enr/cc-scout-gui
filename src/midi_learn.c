@@ -7,6 +7,9 @@ struct midi_learn {
   const device_profile *profile;
   char *device_name;
   GKeyFile *bindings;
+  char **slot_keys;
+  void (*changed)(gpointer);
+  gpointer changed_data;
   char *bindings_path;
   char *bindings_error;
   char *learn_key;
@@ -42,6 +45,32 @@ static char *binding_key(const char *client, const char *port,
   g_free(port_key);
   g_free(client_key);
   return key;
+}
+
+static void load_slots(midi_learn *view) {
+  g_clear_pointer(&view->slot_keys, g_strfreev);
+  const device_profile *profile = view->profile;
+  gsize count;
+  char **saved = g_key_file_get_string_list(view->bindings, "KnobSlots",
+                                            profile->client, &count, NULL);
+  if (saved && count == KNOB_COUNT) {
+    view->slot_keys = saved;
+    return;
+  }
+  g_strfreev(saved);
+  view->slot_keys = g_new0(char *, KNOB_COUNT + 1);
+  for (int i = 0; i < KNOB_COUNT; ++i) {
+    cc_scout_event event = {.channel = profile->knob_channel,
+                            .number = profile->knob_ccs[i]};
+    view->slot_keys[i] =
+        binding_key(profile->client, profile->daw_port, &event);
+  }
+}
+
+char *midi_learn_knob_name(midi_learn *view, unsigned int slot) {
+  char *name = g_key_file_get_string(view->bindings, "Knobs",
+                                     view->slot_keys[slot], NULL);
+  return name ? name : g_strdup(view->profile->knob_names[slot]);
 }
 
 static void clear_learn(midi_learn *view) {
@@ -189,6 +218,9 @@ static void save_learn(GtkButton *button, gpointer userdata) {
   g_free(data);
   if (ready) {
     if (batch) {
+      g_key_file_set_string_list(updated, "KnobSlots", view->profile->client,
+                                 (const char *const *)view->learned_keys,
+                                 KNOB_COUNT);
       for (guint i = 0; i < KNOB_COUNT; ++i) {
         g_key_file_set_string(updated, "Knobs", view->learned_keys[i],
                               view->profile->knob_names[i]);
@@ -201,6 +233,8 @@ static void save_learn(GtkButton *button, gpointer userdata) {
   if (ready) {
     g_key_file_unref(view->bindings);
     view->bindings = g_key_file_ref(updated);
+    load_slots(view);
+    view->changed(view->changed_data);
     char *text = batch ? g_strdup("Saved all eight knobs.")
                        : g_strdup_printf("Saved %s.", name);
     clear_learn(view);
@@ -229,10 +263,14 @@ static gboolean close_settings(GtkWindow *window, gpointer userdata) {
 }
 
 midi_learn *midi_learn_new(AdwPreferencesPage *page, GtkWindow *settings,
-                           const device_profile *profile) {
+                           const device_profile *profile,
+                           void (*changed)(gpointer), gpointer changed_data) {
   midi_learn *view = g_new0(midi_learn, 1);
   view->profile = profile;
+  view->changed = changed;
+  view->changed_data = changed_data;
   load_bindings(view);
+  load_slots(view);
   AdwPreferencesGroup *learn_group =
       ADW_PREFERENCES_GROUP(adw_preferences_group_new());
   adw_preferences_group_set_title(learn_group, "MIDI Learn");
@@ -280,7 +318,8 @@ void midi_learn_set_device(midi_learn *view, const char *name) {
 }
 
 char *midi_learn_event(midi_learn *view, const char *client, const char *port,
-                       const cc_scout_event *event) {
+                       const cc_scout_event *event, int *slot) {
+  *slot = -1;
   if (event->type != CC_SCOUT_CONTROL_CHANGE) {
     return NULL;
   }
@@ -293,6 +332,12 @@ char *midi_learn_event(midi_learn *view, const char *client, const char *port,
       capture_batch_knob(view, key);
     }
   }
+  for (int i = 0; i < KNOB_COUNT; ++i) {
+    if (g_str_equal(key, view->slot_keys[i])) {
+      *slot = i;
+      break;
+    }
+  }
   g_free(key);
   return name;
 }
@@ -300,6 +345,7 @@ char *midi_learn_event(midi_learn *view, const char *client, const char *port,
 void midi_learn_free(midi_learn *view) {
   g_free(view->device_name);
   g_key_file_unref(view->bindings);
+  g_strfreev(view->slot_keys);
   g_free(view->bindings_path);
   g_free(view->bindings_error);
   g_free(view->learn_key);

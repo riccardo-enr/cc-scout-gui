@@ -35,6 +35,12 @@ in the raw feed. Edit `presets/akai-mpk-mini-iv.yaml` and rebuild to match a cus
 preset. The YAML supplies port names, MIDI channels, pad notes, and the names
 used by Learn All Knobs.
 
+The eight knob tiles show saved names and the last relative step: CW for
+clockwise or CCW for counterclockwise. The bundled MPK mini IV DAW preset
+starts with CC 24-31 in physical order. Learn All Knobs saves the slot
+assignments if you use different CC numbers. Rerun it if you saved a
+remapped preset before slot assignments were stored.
+
 ## MIDI Learn
 
 Open Settings, click **Learn**, and turn the knob you want to name. Enter a

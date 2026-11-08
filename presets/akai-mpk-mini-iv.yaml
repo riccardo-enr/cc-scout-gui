@@ -9,5 +9,5 @@ pads:
   bank_b: [44, 45, 46, 47, 48, 49, 50, 51]
 knobs:
   channel: 1
-  known_ccs: [24, 25]
+  ccs: [24, 25, 26, 27, 28, 29, 30, 31]
   names: [Division, Swing, Mode, Oct, Latch, Sync, Gate, BPM]

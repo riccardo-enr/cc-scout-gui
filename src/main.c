@@ -3,6 +3,7 @@
 
 #include "cc_scout.h"
 #include "device_profile.h"
+#include "knob_grid.h"
 #include "midi_learn.h"
 #include "pad_grid.h"
 
@@ -21,6 +22,7 @@ typedef struct {
   const device_profile *profile;
   midi_learn *learn;
   pad_grid pads;
+  knob_grid knobs;
 } monitor_view;
 
 static void collect_source(cc_scout_address address, const char *client_name,
@@ -76,11 +78,7 @@ static const char *control_label(const device_profile *profile,
   gboolean midi = g_str_equal(port, profile->midi_port);
   gboolean daw = g_str_equal(port, profile->daw_port);
   if (event->type == CC_SCOUT_CONTROL_CHANGE) {
-    return daw && event->channel == profile->knob_channel &&
-                   event->number < MIDI_VALUE_COUNT &&
-                   profile->knob_ccs[event->number]
-               ? "Knob"
-               : NULL;
+    return NULL;
   }
   if (event->channel == profile->pad_channel && (midi || daw)) {
     return "Pad";
@@ -105,6 +103,7 @@ static gboolean read_events(monitor_view *view) {
       report_error(view, "Could not read MIDI events.", result);
       close_monitor(view);
       pad_grid_reset(&view->pads);
+      knob_grid_reset(&view->knobs);
       break;
     }
     g_string_append_printf(lines, "%u:%u  ", (unsigned int)event.source.client,
@@ -112,9 +111,16 @@ static gboolean read_events(monitor_view *view) {
     const char *client, *port;
     if (find_source(view->sources, event.source, &client, &port)) {
       pad_grid_event(&view->pads, view->profile, client, port, &event);
-      char *name = midi_learn_event(view->learn, client, port, &event);
-      const char *label =
-          name ? name : control_label(view->profile, client, port, &event);
+      int slot;
+      char *name = midi_learn_event(view->learn, client, port, &event, &slot);
+      if (slot >= 0) {
+        knob_grid_turn(&view->knobs, slot, event.value);
+      }
+      const char *label = name;
+      if (!label) {
+        label = slot >= 0 ? "Knob"
+                          : control_label(view->profile, client, port, &event);
+      }
       if (label) {
         g_string_append_printf(lines, "%s  ", label);
       }
@@ -183,6 +189,7 @@ static gboolean midi_watch_dispatch(GSource *source, GSourceFunc callback,
                  flags < 0 ? flags : -EIO);
     close_monitor(view);
     pad_grid_reset(&view->pads);
+    knob_grid_reset(&view->knobs);
     return G_SOURCE_REMOVE;
   }
   if ((buffered || (flags & POLLIN)) && read_events(view)) {
@@ -272,8 +279,10 @@ static void update_monitor(monitor_view *view) {
   }
   close_monitor(view);
   pad_grid_reset(&view->pads);
-  gtk_widget_set_visible(view->pads.widget,
-                         g_str_equal(name, view->profile->client));
+  knob_grid_reset(&view->knobs);
+  gboolean show_controller = g_str_equal(name, view->profile->client);
+  gtk_widget_set_visible(view->pads.widget, show_controller);
+  gtk_widget_set_visible(view->knobs.widget, show_controller);
   g_clear_pointer(&view->ports, g_variant_unref);
   view->ports = ports;
   if (changed) {
@@ -407,6 +416,17 @@ static void open_settings(GtkButton *button, gpointer userdata) {
   gtk_window_present(GTK_WINDOW(userdata));
 }
 
+static void refresh_knob_names(gpointer userdata) {
+  monitor_view *view = userdata;
+  for (unsigned int i = 0; i < KNOB_COUNT; ++i) {
+    char *name = midi_learn_knob_name(view->learn, i);
+    gtk_label_set_text(view->knobs.names[i], name);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(view->knobs.names[i]), name);
+    g_free(name);
+  }
+  knob_grid_reset(&view->knobs);
+}
+
 static void build_settings(monitor_view *monitor, GtkWindow *parent) {
   monitor->settings = GTK_WINDOW(adw_window_new());
   gtk_window_set_title(monitor->settings, "Settings");
@@ -434,7 +454,8 @@ static void build_settings(monitor_view *monitor, GtkWindow *parent) {
   g_signal_connect(monitor->devices, "row-activated", G_CALLBACK(choose_device),
                    monitor);
 
-  monitor->learn = midi_learn_new(page, monitor->settings, monitor->profile);
+  monitor->learn = midi_learn_new(page, monitor->settings, monitor->profile,
+                                  refresh_knob_names, monitor);
 }
 
 static void activate(GtkApplication *app, gpointer userdata) {
@@ -446,7 +467,7 @@ static void activate(GtkApplication *app, gpointer userdata) {
 
   window = GTK_WINDOW(adw_application_window_new(app));
   gtk_window_set_title(window, "CC Scout");
-  gtk_window_set_default_size(window, 640, 440);
+  gtk_window_set_default_size(window, 640, 560);
   monitor_view *monitor = g_new0(monitor_view, 1);
   monitor->profile = userdata;
 
@@ -475,6 +496,8 @@ static void activate(GtkApplication *app, gpointer userdata) {
   gtk_label_set_xalign(monitor->status, 0.0);
   gtk_label_set_wrap(monitor->status, TRUE);
   gtk_box_append(GTK_BOX(content), GTK_WIDGET(monitor->status));
+  gtk_box_append(GTK_BOX(content), knob_grid_new(&monitor->knobs));
+  refresh_knob_names(monitor);
   gtk_box_append(GTK_BOX(content), pad_grid_new(&monitor->pads));
 
   GtkWidget *scroll = gtk_scrolled_window_new();
