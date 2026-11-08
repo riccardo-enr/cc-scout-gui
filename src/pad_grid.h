@@ -13,9 +13,11 @@ typedef struct {
 } pad_grid;
 
 GtkWidget *pad_grid_new(pad_grid *pads);
+void pad_grid_set_name(pad_grid *pads, unsigned int slot, const char *name);
+void pad_grid_highlight(pad_grid *pads, unsigned int slot);
 void pad_grid_reset(pad_grid *pads);
-void pad_grid_event(pad_grid *pads, const device_profile *profile,
-                    const char *client, const char *port,
-                    const cc_scout_event *event);
+int pad_grid_event(pad_grid *pads, const device_profile *profile,
+                   const char *client, const char *port,
+                   const cc_scout_event *event);
 
 #endif

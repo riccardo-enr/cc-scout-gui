@@ -53,3 +53,9 @@ For the MPK mini IV, click **Learn All Knobs** and follow the prompts for
 Division, Swing, Mode, Oct, Latch, Sync, Gate, and BPM. Turn only the requested
 knob at each step. Click **Save All** after the last knob to write the entire
 set together. Closing Settings before saving cancels the session.
+
+For pads, click **Learn Pad** in Settings. The reference follows the MPK mini
+IV layout, with pads 5-8 above 1-4. Tap one physical pad, check the highlighted
+position, enter a name, and click **Save**. The same physical pad uses the
+saved name in both banks, even after restarting. Mirrored messages capture
+one press and still appear separately in the raw feed.

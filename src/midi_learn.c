@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <glib/gstdio.h>
 
+#include "pad_grid.h"
+
 struct midi_learn {
   const device_profile *profile;
   char *device_name;
@@ -15,6 +17,8 @@ struct midi_learn {
   char *learn_key;
   gboolean learning;
   gboolean learning_all;
+  gboolean learning_pad;
+  pad_grid pad_reference;
   guint learned_count;
   char *learned_keys[KNOB_COUNT];
   GtkLabel *learn_status;
@@ -31,7 +35,7 @@ static void load_bindings(midi_learn *view) {
                                  G_KEY_FILE_NONE, &error) &&
       !g_error_matches(error, G_FILE_ERROR, G_FILE_ERROR_NOENT)) {
     view->bindings_error =
-        g_strdup_printf("Could not load knob names. %s", error->message);
+        g_strdup_printf("Could not load control names. %s", error->message);
   }
   g_clear_error(&error);
 }
@@ -76,6 +80,10 @@ char *midi_learn_knob_name(midi_learn *view, unsigned int slot) {
 static void clear_learn(midi_learn *view) {
   view->learning = FALSE;
   view->learning_all = FALSE;
+  view->learning_pad = FALSE;
+  pad_grid_reset(&view->pad_reference);
+  gtk_widget_set_visible(view->pad_reference.widget, FALSE);
+  gtk_entry_set_placeholder_text(view->learn_name, "Knob name");
   for (guint i = 0; i < view->learned_count; ++i) {
     g_clear_pointer(&view->learned_keys[i], g_free);
   }
@@ -108,6 +116,24 @@ static void start_learn(GtkButton *button, gpointer userdata) {
   if (arm_learn(view)) {
     gtk_label_set_text(view->learn_status, "Turn the knob you want to name.");
   }
+}
+
+static void start_learn_pad(GtkButton *button, gpointer userdata) {
+  (void)button;
+  midi_learn *view = userdata;
+  if (!arm_learn(view)) {
+    return;
+  }
+  if (!g_str_equal(view->device_name, view->profile->client)) {
+    clear_learn(view);
+    gtk_label_set_text(view->learn_status,
+                       "Select the preset controller first.");
+    return;
+  }
+  view->learning_pad = TRUE;
+  gtk_widget_set_visible(view->pad_reference.widget, TRUE);
+  gtk_entry_set_placeholder_text(view->learn_name, "Pad name");
+  gtk_label_set_text(view->learn_status, "Tap the pad you want to name.");
 }
 
 static void prompt_next_knob(midi_learn *view) {
@@ -156,18 +182,38 @@ static void capture_batch_knob(midi_learn *view, const char *key) {
   gtk_widget_set_sensitive(view->learn_save, TRUE);
 }
 
-static void capture_knob(midi_learn *view, const char *key, const char *name,
-                         const cc_scout_event *event) {
+static void capture_name(midi_learn *view, char *key, const char *name,
+                         const char *prompt) {
   view->learning = FALSE;
-  view->learn_key = g_strdup(key);
-  char *text = g_strdup_printf("Captured channel %u, CC %u. Name this knob.",
-                               event->channel, event->number);
-  gtk_label_set_text(view->learn_status, text);
-  g_free(text);
+  view->learn_key = key;
+  gtk_label_set_text(view->learn_status, prompt);
   gtk_widget_set_sensitive(GTK_WIDGET(view->learn_name), TRUE);
   gtk_widget_set_sensitive(view->learn_save, TRUE);
   gtk_editable_set_text(GTK_EDITABLE(view->learn_name), name ? name : "");
   gtk_widget_grab_focus(GTK_WIDGET(view->learn_name));
+}
+
+static char *pad_key(midi_learn *view, unsigned int slot) {
+  return g_strdup_printf("%s/%u", view->profile->client, slot + 1);
+}
+
+char *midi_learn_pad_name(midi_learn *view, unsigned int slot) {
+  char *key = pad_key(view, slot);
+  char *name = g_key_file_get_string(view->bindings, "Pads", key, NULL);
+  g_free(key);
+  return name ? name : g_strdup_printf("Pad %u", slot + 1);
+}
+
+void midi_learn_pad_pressed(midi_learn *view, unsigned int slot) {
+  if (!view->learning || !view->learning_pad) {
+    return;
+  }
+  pad_grid_highlight(&view->pad_reference, slot);
+  char *name = midi_learn_pad_name(view, slot);
+  char *prompt = g_strdup_printf("Captured pad %u. Name this pad.", slot + 1);
+  capture_name(view, pad_key(view, slot), name, prompt);
+  g_free(prompt);
+  g_free(name);
 }
 
 static gboolean write_bindings(midi_learn *view, GKeyFile *bindings,
@@ -203,7 +249,9 @@ static void save_learn(GtkButton *button, gpointer userdata) {
     name = g_strdup(gtk_editable_get_text(GTK_EDITABLE(view->learn_name)));
     g_strstrip(name);
     if (!*name) {
-      gtk_label_set_text(view->learn_status, "Enter a knob name first.");
+      gtk_label_set_text(view->learn_status, view->learning_pad
+                                                 ? "Enter a pad name first."
+                                                 : "Enter a knob name first.");
       g_free(name);
       return;
     }
@@ -226,7 +274,8 @@ static void save_learn(GtkButton *button, gpointer userdata) {
                               view->profile->knob_names[i]);
       }
     } else {
-      g_key_file_set_string(updated, "Knobs", view->learn_key, name);
+      g_key_file_set_string(updated, view->learning_pad ? "Pads" : "Knobs",
+                            view->learn_key, name);
     }
     ready = write_bindings(view, updated, &error);
   }
@@ -242,7 +291,7 @@ static void save_learn(GtkButton *button, gpointer userdata) {
     g_free(text);
   } else {
     char *text =
-        g_strdup_printf("Could not save knob names. %s", error->message);
+        g_strdup_printf("Could not save control names. %s", error->message);
     gtk_label_set_text(view->learn_status, text);
     g_free(text);
     g_error_free(error);
@@ -253,7 +302,7 @@ static void save_learn(GtkButton *button, gpointer userdata) {
 
 void midi_learn_reset(midi_learn *view) {
   clear_learn(view);
-  gtk_label_set_text(view->learn_status, "Name a knob for the live feed.");
+  gtk_label_set_text(view->learn_status, "Name a knob or pad.");
 }
 
 static gboolean close_settings(GtkWindow *window, gpointer userdata) {
@@ -286,13 +335,20 @@ midi_learn *midi_learn_new(AdwPreferencesPage *page, GtkWindow *settings,
   adw_action_row_add_suffix(actions, learn_all_button);
   adw_preferences_group_add(learn_group, GTK_WIDGET(actions));
 
+  AdwActionRow *pad_action = ADW_ACTION_ROW(adw_action_row_new());
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(pad_action), "Pad names");
+  GtkWidget *learn_pad_button = gtk_button_new_with_label("Learn Pad");
+  gtk_widget_set_valign(learn_pad_button, GTK_ALIGN_CENTER);
+  adw_action_row_add_suffix(pad_action, learn_pad_button);
+  adw_preferences_group_add(learn_group, GTK_WIDGET(pad_action));
+
   GtkWidget *editor = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   adw_preferences_group_add(learn_group, editor);
-  view->learn_status =
-      GTK_LABEL(gtk_label_new("Name a knob for the live feed."));
+  view->learn_status = GTK_LABEL(gtk_label_new("Name a knob or pad."));
   gtk_label_set_xalign(view->learn_status, 0.0);
   gtk_label_set_wrap(view->learn_status, TRUE);
   gtk_box_append(GTK_BOX(editor), GTK_WIDGET(view->learn_status));
+  gtk_box_append(GTK_BOX(editor), pad_grid_new(&view->pad_reference));
 
   GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_box_append(GTK_BOX(editor), controls);
@@ -306,6 +362,8 @@ midi_learn *midi_learn_new(AdwPreferencesPage *page, GtkWindow *settings,
   clear_learn(view);
   g_signal_connect(learn_button, "clicked", G_CALLBACK(start_learn), view);
   g_signal_connect(learn_all_button, "clicked", G_CALLBACK(start_learn_all),
+                   view);
+  g_signal_connect(learn_pad_button, "clicked", G_CALLBACK(start_learn_pad),
                    view);
   g_signal_connect(view->learn_save, "clicked", G_CALLBACK(save_learn), view);
   g_signal_connect(settings, "close-request", G_CALLBACK(close_settings), view);
@@ -325,9 +383,13 @@ char *midi_learn_event(midi_learn *view, const char *client, const char *port,
   }
   char *key = binding_key(client, port, event);
   char *name = g_key_file_get_string(view->bindings, "Knobs", key, NULL);
-  if (view->learning) {
+  if (view->learning && !view->learning_pad) {
     if (!view->learning_all) {
-      capture_knob(view, key, name, event);
+      char *prompt =
+          g_strdup_printf("Captured channel %u, CC %u. Name this knob.",
+                          event->channel, event->number);
+      capture_name(view, g_strdup(key), name, prompt);
+      g_free(prompt);
     } else if (g_str_equal(client, view->profile->client)) {
       capture_batch_knob(view, key);
     }

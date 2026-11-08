@@ -31,12 +31,25 @@ GtkWidget *pad_grid_new(pad_grid *pads) {
     GtkWidget *tile = gtk_toggle_button_new_with_label(label);
     g_free(label);
     pads->tiles[i] = GTK_TOGGLE_BUTTON(tile);
+    GtkLabel *text = GTK_LABEL(gtk_button_get_child(GTK_BUTTON(tile)));
+    gtk_label_set_ellipsize(text, PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(text, 18);
     gtk_widget_set_can_target(tile, FALSE);
     gtk_widget_set_focusable(tile, FALSE);
     gtk_widget_set_size_request(tile, -1, 42);
     gtk_grid_attach(grid, tile, i % 4, 1 - i / 4, 1, 1);
   }
   return pads->widget;
+}
+
+void pad_grid_set_name(pad_grid *pads, unsigned int slot, const char *name) {
+  GtkWidget *tile = GTK_WIDGET(pads->tiles[slot]);
+  gtk_label_set_text(GTK_LABEL(gtk_button_get_child(GTK_BUTTON(tile))), name);
+  gtk_widget_set_tooltip_text(tile, name);
+}
+
+void pad_grid_highlight(pad_grid *pads, unsigned int slot) {
+  set_tile(pads->tiles[slot], TRUE);
 }
 
 void pad_grid_reset(pad_grid *pads) {
@@ -46,13 +59,13 @@ void pad_grid_reset(pad_grid *pads) {
   }
 }
 
-void pad_grid_event(pad_grid *pads, const device_profile *profile,
-                    const char *client, const char *port,
-                    const cc_scout_event *event) {
+int pad_grid_event(pad_grid *pads, const device_profile *profile,
+                   const char *client, const char *port,
+                   const cc_scout_event *event) {
   if (!g_str_equal(client, profile->client) ||
       event->channel != profile->pad_channel ||
       (event->type != CC_SCOUT_NOTE_ON && event->type != CC_SCOUT_NOTE_OFF)) {
-    return;
+    return -1;
   }
   unsigned int note = 0;
   while (note < G_N_ELEMENTS(profile->pad_notes) &&
@@ -60,7 +73,7 @@ void pad_grid_event(pad_grid *pads, const device_profile *profile,
     ++note;
   }
   if (note == G_N_ELEMENTS(profile->pad_notes)) {
-    return;
+    return -1;
   }
   guint8 port_bit;
   if (g_str_equal(port, profile->midi_port)) {
@@ -68,13 +81,16 @@ void pad_grid_event(pad_grid *pads, const device_profile *profile,
   } else if (g_str_equal(port, profile->daw_port)) {
     port_bit = 2;
   } else {
-    return;
+    return -1;
   }
   unsigned int pad = note % PAD_COUNT;
+  gboolean was_pressed = gtk_toggle_button_get_active(pads->tiles[pad]);
   if (event->type == CC_SCOUT_NOTE_ON) {
     pads->held[note] |= port_bit;
   } else {
     pads->held[note] &= ~port_bit;
   }
-  set_tile(pads->tiles[pad], pads->held[pad] || pads->held[pad + PAD_COUNT]);
+  gboolean pressed = pads->held[pad] || pads->held[pad + PAD_COUNT];
+  set_tile(pads->tiles[pad], pressed);
+  return pressed && !was_pressed ? (int)pad : -1;
 }

@@ -110,7 +110,11 @@ static gboolean read_events(monitor_view *view) {
                            (unsigned int)event.source.port);
     const char *client, *port;
     if (find_source(view->sources, event.source, &client, &port)) {
-      pad_grid_event(&view->pads, view->profile, client, port, &event);
+      int pad =
+          pad_grid_event(&view->pads, view->profile, client, port, &event);
+      if (pad >= 0) {
+        midi_learn_pad_pressed(view->learn, pad);
+      }
       int slot;
       char *name = midi_learn_event(view->learn, client, port, &event, &slot);
       if (slot >= 0) {
@@ -416,7 +420,7 @@ static void open_settings(GtkButton *button, gpointer userdata) {
   gtk_window_present(GTK_WINDOW(userdata));
 }
 
-static void refresh_knob_names(gpointer userdata) {
+static void refresh_control_names(gpointer userdata) {
   monitor_view *view = userdata;
   for (unsigned int i = 0; i < KNOB_COUNT; ++i) {
     char *name = midi_learn_knob_name(view->learn, i);
@@ -424,7 +428,11 @@ static void refresh_knob_names(gpointer userdata) {
     gtk_widget_set_tooltip_text(GTK_WIDGET(view->knobs.names[i]), name);
     g_free(name);
   }
-  knob_grid_reset(&view->knobs);
+  for (unsigned int i = 0; i < PAD_COUNT; ++i) {
+    char *name = midi_learn_pad_name(view->learn, i);
+    pad_grid_set_name(&view->pads, i, name);
+    g_free(name);
+  }
 }
 
 static void build_settings(monitor_view *monitor, GtkWindow *parent) {
@@ -455,7 +463,7 @@ static void build_settings(monitor_view *monitor, GtkWindow *parent) {
                    monitor);
 
   monitor->learn = midi_learn_new(page, monitor->settings, monitor->profile,
-                                  refresh_knob_names, monitor);
+                                  refresh_control_names, monitor);
 }
 
 static void activate(GtkApplication *app, gpointer userdata) {
@@ -497,8 +505,8 @@ static void activate(GtkApplication *app, gpointer userdata) {
   gtk_label_set_wrap(monitor->status, TRUE);
   gtk_box_append(GTK_BOX(content), GTK_WIDGET(monitor->status));
   gtk_box_append(GTK_BOX(content), knob_grid_new(&monitor->knobs));
-  refresh_knob_names(monitor);
   gtk_box_append(GTK_BOX(content), pad_grid_new(&monitor->pads));
+  refresh_control_names(monitor);
 
   GtkWidget *scroll = gtk_scrolled_window_new();
   gtk_widget_set_vexpand(scroll, TRUE);
