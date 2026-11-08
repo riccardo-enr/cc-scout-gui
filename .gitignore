@@ -1,4 +1,7 @@
+# Building
 /build/
-/.cache/
 /CMakeUserPresets.json
 /compile_commands.json
+
+# Caching
+/.cache/
