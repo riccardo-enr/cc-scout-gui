@@ -45,6 +45,38 @@ static void report_error(monitor_view *view, const char *message, int result) {
   g_free(text);
 }
 
+static const char *control_label(GVariant *sources,
+                                 const cc_scout_event *event) {
+  GVariantIter iter;
+  g_variant_iter_init(&iter, sources);
+  guint8 client_id, port_id;
+  const char *client, *port;
+  while (g_variant_iter_next(&iter, "(yy&s&s)", &client_id, &port_id, &client,
+                             &port)) {
+    if (client_id != event->source.client || port_id != event->source.port ||
+        !g_str_equal(client, "MPK mini IV")) {
+      continue;
+    }
+
+    gboolean midi = g_str_equal(port, "MPK mini IV MIDI Port");
+    gboolean daw = g_str_equal(port, "MPK mini IV DAW Port");
+    if (event->type == CC_SCOUT_CONTROL_CHANGE) {
+      return daw && event->channel == 1 &&
+                     (event->number == 24 || event->number == 25)
+                 ? "Knob"
+                 : NULL;
+    }
+    if (event->channel == 10 && (midi || daw)) {
+      return "Pad";
+    }
+    if (event->channel == 1 && midi) {
+      return "Key";
+    }
+    break;
+  }
+  return NULL;
+}
+
 static gboolean read_events(monitor_view *view) {
   GtkTextBuffer *buffer = gtk_text_view_get_buffer(view->feed);
   GString *lines = g_string_new(NULL);
@@ -65,6 +97,10 @@ static gboolean read_events(monitor_view *view) {
     }
     g_string_append_printf(lines, "%u:%u  ", (unsigned int)event.source.client,
                            (unsigned int)event.source.port);
+    const char *label = control_label(view->sources, &event);
+    if (label) {
+      g_string_append_printf(lines, "%s  ", label);
+    }
     if (event.type == CC_SCOUT_CONTROL_CHANGE) {
       g_string_append_printf(lines, "cc ch=%u controller=%u value=%d\n",
                              event.channel, event.number, event.value);
