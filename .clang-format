@@ -1,0 +1,14 @@
+BasedOnStyle: Google
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+DerivePointerAlignment: false
+PointerAlignment: Right
+InsertBraces: true
+IncludeCategories:
+  - Regex: '^<.*>$'
+    Priority: 1
+  - Regex: '.*'
+    Priority: 2
