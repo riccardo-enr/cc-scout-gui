@@ -1,7 +1,12 @@
 #include <adwaita.h>
 #include <errno.h>
+#include <glib/gstdio.h>
 
 #include "cc_scout.h"
+
+static const char *const knob_names[] = {
+    "Division", "Swing", "Mode", "Oct", "Latch", "Sync", "Gate", "BPM",
+};
 
 typedef struct {
   GtkWindow *settings;
@@ -15,6 +20,17 @@ typedef struct {
   guint8 device_id;
   guint scan_timer;
   GSource *read_source;
+  GKeyFile *bindings;
+  char *bindings_path;
+  char *bindings_error;
+  char *learn_key;
+  gboolean learning;
+  gboolean learning_all;
+  guint learned_count;
+  char *learned_keys[G_N_ELEMENTS(knob_names)];
+  GtkLabel *learn_status;
+  GtkEntry *learn_name;
+  GtkWidget *learn_save;
 } monitor_view;
 
 static void collect_source(cc_scout_address address, const char *client_name,
@@ -45,36 +61,245 @@ static void report_error(monitor_view *view, const char *message, int result) {
   g_free(text);
 }
 
-static const char *control_label(GVariant *sources,
-                                 const cc_scout_event *event) {
+static gboolean find_source(GVariant *sources, cc_scout_address address,
+                            const char **client, const char **port) {
   GVariantIter iter;
   g_variant_iter_init(&iter, sources);
   guint8 client_id, port_id;
-  const char *client, *port;
-  while (g_variant_iter_next(&iter, "(yy&s&s)", &client_id, &port_id, &client,
-                             &port)) {
-    if (client_id != event->source.client || port_id != event->source.port ||
-        !g_str_equal(client, "MPK mini IV")) {
-      continue;
+  while (g_variant_iter_next(&iter, "(yy&s&s)", &client_id, &port_id, client,
+                             port)) {
+    if (client_id == address.client && port_id == address.port) {
+      return TRUE;
     }
-
-    gboolean midi = g_str_equal(port, "MPK mini IV MIDI Port");
-    gboolean daw = g_str_equal(port, "MPK mini IV DAW Port");
-    if (event->type == CC_SCOUT_CONTROL_CHANGE) {
-      return daw && event->channel == 1 &&
-                     (event->number == 24 || event->number == 25)
-                 ? "Knob"
-                 : NULL;
-    }
-    if (event->channel == 10 && (midi || daw)) {
-      return "Pad";
-    }
-    if (event->channel == 1 && midi) {
-      return "Key";
-    }
-    break;
   }
-  return NULL;
+  return FALSE;
+}
+
+static const char *control_label(const char *client, const char *port,
+                                 const cc_scout_event *event) {
+  if (!g_str_equal(client, "MPK mini IV")) {
+    return NULL;
+  }
+
+  gboolean midi = g_str_equal(port, "MPK mini IV MIDI Port");
+  gboolean daw = g_str_equal(port, "MPK mini IV DAW Port");
+  if (event->type == CC_SCOUT_CONTROL_CHANGE) {
+    return daw && event->channel == 1 &&
+                   (event->number == 24 || event->number == 25)
+               ? "Knob"
+               : NULL;
+  }
+  if (event->channel == 10 && (midi || daw)) {
+    return "Pad";
+  }
+  return event->channel == 1 && midi ? "Key" : NULL;
+}
+
+static void load_bindings(monitor_view *view) {
+  view->bindings = g_key_file_new();
+  view->bindings_path = g_build_filename(g_get_user_config_dir(),
+                                         "cc-scout-gui", "knobs.ini", NULL);
+  GError *error = NULL;
+  if (!g_key_file_load_from_file(view->bindings, view->bindings_path,
+                                 G_KEY_FILE_NONE, &error) &&
+      !g_error_matches(error, G_FILE_ERROR, G_FILE_ERROR_NOENT)) {
+    view->bindings_error =
+        g_strdup_printf("Could not load knob names. %s", error->message);
+  }
+  g_clear_error(&error);
+}
+
+static char *binding_key(const char *client, const char *port,
+                         const cc_scout_event *event) {
+  char *client_key = g_uri_escape_string(client, NULL, FALSE);
+  char *port_key = g_uri_escape_string(port, NULL, FALSE);
+  char *key = g_strdup_printf("%s/%s/%u/%u", client_key, port_key,
+                              event->channel, event->number);
+  g_free(port_key);
+  g_free(client_key);
+  return key;
+}
+
+static void clear_learn(monitor_view *view) {
+  view->learning = FALSE;
+  view->learning_all = FALSE;
+  for (guint i = 0; i < view->learned_count; ++i) {
+    g_clear_pointer(&view->learned_keys[i], g_free);
+  }
+  view->learned_count = 0;
+  g_clear_pointer(&view->learn_key, g_free);
+  gtk_widget_set_visible(GTK_WIDGET(view->learn_name), TRUE);
+  gtk_button_set_label(GTK_BUTTON(view->learn_save), "Save");
+  gtk_editable_set_text(GTK_EDITABLE(view->learn_name), "");
+  gtk_widget_set_sensitive(GTK_WIDGET(view->learn_name), FALSE);
+  gtk_widget_set_sensitive(view->learn_save, FALSE);
+}
+
+static gboolean arm_learn(monitor_view *view) {
+  clear_learn(view);
+  if (view->bindings_error) {
+    gtk_label_set_text(view->learn_status, view->bindings_error);
+    return FALSE;
+  }
+  if (!view->monitor) {
+    gtk_label_set_text(view->learn_status, "Connect a MIDI device first.");
+    return FALSE;
+  }
+  view->learning = TRUE;
+  return TRUE;
+}
+
+static void start_learn(GtkButton *button, gpointer userdata) {
+  (void)button;
+  monitor_view *view = userdata;
+  if (arm_learn(view)) {
+    gtk_label_set_text(view->learn_status, "Turn the knob you want to name.");
+  }
+}
+
+static void prompt_next_knob(monitor_view *view) {
+  guint index = view->learned_count;
+  char *prompt = g_strdup_printf("Turn knob %u of %u: %s.", index + 1,
+                                 (unsigned int)G_N_ELEMENTS(knob_names),
+                                 knob_names[index]);
+  gtk_label_set_text(view->learn_status, prompt);
+  g_free(prompt);
+}
+
+static void start_learn_all(GtkButton *button, gpointer userdata) {
+  (void)button;
+  monitor_view *view = userdata;
+  if (!arm_learn(view)) {
+    return;
+  }
+  if (view->device_name && !g_str_equal(view->device_name, "MPK mini IV")) {
+    clear_learn(view);
+    gtk_label_set_text(view->learn_status, "Select the MPK mini IV first.");
+    return;
+  }
+  view->learning_all = TRUE;
+  gtk_widget_set_visible(GTK_WIDGET(view->learn_name), FALSE);
+  gtk_button_set_label(GTK_BUTTON(view->learn_save), "Save All");
+  prompt_next_knob(view);
+}
+
+static void capture_batch_knob(monitor_view *view, const char *key) {
+  for (guint i = 0; i < view->learned_count; ++i) {
+    if (g_str_equal(view->learned_keys[i], key)) {
+      return;
+    }
+  }
+  view->learned_keys[view->learned_count++] = g_strdup(key);
+  if (view->learned_count < G_N_ELEMENTS(knob_names)) {
+    prompt_next_knob(view);
+    return;
+  }
+  view->learning = FALSE;
+  gtk_label_set_text(view->learn_status,
+                     "All eight knobs captured. Click Save All to apply.");
+  gtk_widget_set_sensitive(view->learn_save, TRUE);
+}
+
+static void capture_knob(monitor_view *view, const char *key, const char *name,
+                         const cc_scout_event *event) {
+  view->learning = FALSE;
+  view->learn_key = g_strdup(key);
+  char *text = g_strdup_printf("Captured channel %u, CC %u. Name this knob.",
+                               event->channel, event->number);
+  gtk_label_set_text(view->learn_status, text);
+  g_free(text);
+  gtk_widget_set_sensitive(GTK_WIDGET(view->learn_name), TRUE);
+  gtk_widget_set_sensitive(view->learn_save, TRUE);
+  gtk_editable_set_text(GTK_EDITABLE(view->learn_name), name ? name : "");
+  gtk_widget_grab_focus(GTK_WIDGET(view->learn_name));
+}
+
+static gboolean write_bindings(monitor_view *view, GKeyFile *bindings,
+                               GError **error) {
+  char *directory = g_path_get_dirname(view->bindings_path);
+  int result = g_mkdir_with_parents(directory, 0700);
+  int directory_error = errno;
+  g_free(directory);
+  if (result < 0) {
+    g_set_error_literal(error, G_FILE_ERROR,
+                        g_file_error_from_errno(directory_error),
+                        g_strerror(directory_error));
+    return FALSE;
+  }
+  gsize size;
+  char *data = g_key_file_to_data(bindings, &size, NULL);
+  gboolean saved =
+      g_file_set_contents_full(view->bindings_path, data, size,
+                               G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
+  g_free(data);
+  return saved;
+}
+
+static void save_learn(GtkButton *button, gpointer userdata) {
+  (void)button;
+  monitor_view *view = userdata;
+  gboolean batch = view->learning_all;
+  if (batch ? view->learned_count != G_N_ELEMENTS(knob_names)
+            : !view->learn_key) {
+    return;
+  }
+  char *name = NULL;
+  if (!batch) {
+    name = g_strdup(gtk_editable_get_text(GTK_EDITABLE(view->learn_name)));
+    g_strstrip(name);
+    if (!*name) {
+      gtk_label_set_text(view->learn_status, "Enter a knob name first.");
+      g_free(name);
+      return;
+    }
+  }
+
+  GKeyFile *updated = g_key_file_new();
+  gsize size;
+  char *data = g_key_file_to_data(view->bindings, &size, NULL);
+  GError *error = NULL;
+  gboolean ready = !size || g_key_file_load_from_data(updated, data, size,
+                                                      G_KEY_FILE_NONE, &error);
+  g_free(data);
+  if (ready) {
+    if (batch) {
+      for (guint i = 0; i < G_N_ELEMENTS(knob_names); ++i) {
+        g_key_file_set_string(updated, "Knobs", view->learned_keys[i],
+                              knob_names[i]);
+      }
+    } else {
+      g_key_file_set_string(updated, "Knobs", view->learn_key, name);
+    }
+    ready = write_bindings(view, updated, &error);
+  }
+  if (ready) {
+    g_key_file_unref(view->bindings);
+    view->bindings = g_key_file_ref(updated);
+    char *text = batch ? g_strdup("Saved all eight knobs.")
+                       : g_strdup_printf("Saved %s.", name);
+    clear_learn(view);
+    gtk_label_set_text(view->learn_status, text);
+    g_free(text);
+  } else {
+    char *text =
+        g_strdup_printf("Could not save knob names. %s", error->message);
+    gtk_label_set_text(view->learn_status, text);
+    g_free(text);
+    g_error_free(error);
+  }
+  g_key_file_unref(updated);
+  g_free(name);
+}
+
+static void reset_learn(monitor_view *view) {
+  clear_learn(view);
+  gtk_label_set_text(view->learn_status, "Name a knob for the live feed.");
+}
+
+static gboolean close_settings(GtkWindow *window, gpointer userdata) {
+  (void)window;
+  reset_learn(userdata);
+  return FALSE;
 }
 
 static gboolean read_events(monitor_view *view) {
@@ -97,9 +322,26 @@ static gboolean read_events(monitor_view *view) {
     }
     g_string_append_printf(lines, "%u:%u  ", (unsigned int)event.source.client,
                            (unsigned int)event.source.port);
-    const char *label = control_label(view->sources, &event);
-    if (label) {
-      g_string_append_printf(lines, "%s  ", label);
+    const char *client, *port;
+    if (find_source(view->sources, event.source, &client, &port)) {
+      char *name = NULL;
+      if (event.type == CC_SCOUT_CONTROL_CHANGE) {
+        char *key = binding_key(client, port, &event);
+        name = g_key_file_get_string(view->bindings, "Knobs", key, NULL);
+        if (view->learning) {
+          if (!view->learning_all) {
+            capture_knob(view, key, name, &event);
+          } else if (g_str_equal(client, "MPK mini IV")) {
+            capture_batch_knob(view, key);
+          }
+        }
+        g_free(key);
+      }
+      const char *label = name ? name : control_label(client, port, &event);
+      if (label) {
+        g_string_append_printf(lines, "%s  ", label);
+      }
+      g_free(name);
     }
     if (event.type == CC_SCOUT_CONTROL_CHANGE) {
       g_string_append_printf(lines, "cc ch=%u controller=%u value=%d\n",
@@ -296,6 +538,7 @@ static void choose_device(GtkListBox *list, GtkListBoxRow *row,
   view->device_id =
       GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(row), "device-id"));
   update_monitor(view);
+  reset_learn(view);
   gtk_widget_set_visible(GTK_WIDGET(view->settings), FALSE);
 }
 
@@ -369,12 +612,88 @@ static void free_monitor_view(gpointer userdata) {
   g_clear_pointer(&view->ports, g_variant_unref);
   g_clear_pointer(&view->sources, g_variant_unref);
   g_free(view->device_name);
+  g_key_file_unref(view->bindings);
+  g_free(view->bindings_path);
+  g_free(view->bindings_error);
+  g_free(view->learn_key);
+  for (guint i = 0; i < view->learned_count; ++i) {
+    g_free(view->learned_keys[i]);
+  }
   g_free(view);
 }
 
 static void open_settings(GtkButton *button, gpointer userdata) {
   (void)button;
   gtk_window_present(GTK_WINDOW(userdata));
+}
+
+static void build_settings(monitor_view *monitor, GtkWindow *parent) {
+  monitor->settings = GTK_WINDOW(adw_window_new());
+  gtk_window_set_title(monitor->settings, "Settings");
+  gtk_window_set_default_size(monitor->settings, 460, 500);
+  gtk_window_set_transient_for(monitor->settings, parent);
+  gtk_window_set_modal(monitor->settings, TRUE);
+  gtk_window_set_destroy_with_parent(monitor->settings, TRUE);
+  gtk_window_set_hide_on_close(monitor->settings, TRUE);
+
+  AdwToolbarView *toolbar = ADW_TOOLBAR_VIEW(adw_toolbar_view_new());
+  adw_toolbar_view_add_top_bar(toolbar, adw_header_bar_new());
+  adw_window_set_content(ADW_WINDOW(monitor->settings), GTK_WIDGET(toolbar));
+  AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+  adw_toolbar_view_set_content(toolbar, GTK_WIDGET(page));
+
+  AdwPreferencesGroup *device_group =
+      ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+  adw_preferences_group_set_title(device_group, "MIDI Device");
+  adw_preferences_page_add(page, device_group);
+  monitor->devices = GTK_LIST_BOX(gtk_list_box_new());
+  gtk_widget_add_css_class(GTK_WIDGET(monitor->devices), "boxed-list");
+  gtk_list_box_set_selection_mode(monitor->devices, GTK_SELECTION_NONE);
+  gtk_list_box_set_activate_on_single_click(monitor->devices, TRUE);
+  adw_preferences_group_add(device_group, GTK_WIDGET(monitor->devices));
+  g_signal_connect(monitor->devices, "row-activated", G_CALLBACK(choose_device),
+                   monitor);
+
+  AdwPreferencesGroup *learn_group =
+      ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+  adw_preferences_group_set_title(learn_group, "MIDI Learn");
+  adw_preferences_page_add(page, learn_group);
+
+  AdwActionRow *actions = ADW_ACTION_ROW(adw_action_row_new());
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(actions), "Knob names");
+  GtkWidget *learn_button = gtk_button_new_with_label("Learn");
+  GtkWidget *learn_all_button = gtk_button_new_with_label("Learn All Knobs");
+  gtk_widget_set_valign(learn_button, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(learn_all_button, GTK_ALIGN_CENTER);
+  adw_action_row_add_suffix(actions, learn_button);
+  adw_action_row_add_suffix(actions, learn_all_button);
+  adw_preferences_group_add(learn_group, GTK_WIDGET(actions));
+
+  GtkWidget *editor = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  adw_preferences_group_add(learn_group, editor);
+  monitor->learn_status =
+      GTK_LABEL(gtk_label_new("Name a knob for the live feed."));
+  gtk_label_set_xalign(monitor->learn_status, 0.0);
+  gtk_label_set_wrap(monitor->learn_status, TRUE);
+  gtk_box_append(GTK_BOX(editor), GTK_WIDGET(monitor->learn_status));
+
+  GtkWidget *controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_box_append(GTK_BOX(editor), controls);
+  monitor->learn_name = GTK_ENTRY(gtk_entry_new());
+  gtk_entry_set_placeholder_text(monitor->learn_name, "Knob name");
+  gtk_entry_set_max_length(monitor->learn_name, 64);
+  gtk_widget_set_hexpand(GTK_WIDGET(monitor->learn_name), TRUE);
+  gtk_box_append(GTK_BOX(controls), GTK_WIDGET(monitor->learn_name));
+  monitor->learn_save = gtk_button_new_with_label("Save");
+  gtk_box_append(GTK_BOX(controls), monitor->learn_save);
+  clear_learn(monitor);
+  g_signal_connect(learn_button, "clicked", G_CALLBACK(start_learn), monitor);
+  g_signal_connect(learn_all_button, "clicked", G_CALLBACK(start_learn_all),
+                   monitor);
+  g_signal_connect(monitor->learn_save, "clicked", G_CALLBACK(save_learn),
+                   monitor);
+  g_signal_connect(monitor->settings, "close-request",
+                   G_CALLBACK(close_settings), monitor);
 }
 
 static void activate(GtkApplication *app, gpointer userdata) {
@@ -389,6 +708,7 @@ static void activate(GtkApplication *app, gpointer userdata) {
   gtk_window_set_title(window, "CC Scout");
   gtk_window_set_default_size(window, 640, 440);
   monitor_view *monitor = g_new0(monitor_view, 1);
+  load_bindings(monitor);
 
   AdwToolbarView *view = ADW_TOOLBAR_VIEW(adw_toolbar_view_new());
   AdwHeaderBar *header = ADW_HEADER_BAR(adw_header_bar_new());
@@ -396,22 +716,7 @@ static void activate(GtkApplication *app, gpointer userdata) {
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(window),
                                      GTK_WIDGET(view));
 
-  monitor->settings = GTK_WINDOW(gtk_window_new());
-  gtk_window_set_title(monitor->settings, "MIDI Device Settings");
-  gtk_window_set_default_size(monitor->settings, 380, 320);
-  gtk_window_set_transient_for(monitor->settings, window);
-  gtk_window_set_modal(monitor->settings, TRUE);
-  gtk_window_set_destroy_with_parent(monitor->settings, TRUE);
-  gtk_window_set_hide_on_close(monitor->settings, TRUE);
-  GtkWidget *device_scroll = gtk_scrolled_window_new();
-  gtk_window_set_child(monitor->settings, device_scroll);
-  monitor->devices = GTK_LIST_BOX(gtk_list_box_new());
-  gtk_list_box_set_selection_mode(monitor->devices, GTK_SELECTION_NONE);
-  gtk_list_box_set_activate_on_single_click(monitor->devices, TRUE);
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(device_scroll),
-                                GTK_WIDGET(monitor->devices));
-  g_signal_connect(monitor->devices, "row-activated", G_CALLBACK(choose_device),
-                   monitor);
+  build_settings(monitor, window);
 
   GtkWidget *settings_button =
       gtk_button_new_from_icon_name("emblem-system-symbolic");
