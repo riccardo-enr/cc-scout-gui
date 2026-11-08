@@ -2,7 +2,7 @@
 
 A C and GTK 4 frontend for the [CC Scout MIDI core](https://github.com/riccardo-enr/cc-scout).
 The first window follows the desktop's light or dark preference and shows live
-MIDI notes and control changes.
+MIDI notes and control changes when the ALSA sequencer signals input readiness.
 
 ```text
 ALSA sequencer -> CC Scout core -> GTK source list

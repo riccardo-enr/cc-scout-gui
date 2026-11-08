@@ -14,7 +14,7 @@ typedef struct {
   char *device_name;
   guint8 device_id;
   guint scan_timer;
-  guint read_timer;
+  GSource *read_source;
 } monitor_view;
 
 static void collect_source(cc_scout_address address, const char *client_name,
@@ -29,6 +29,10 @@ static void collect_source(cc_scout_address address, const char *client_name,
 }
 
 static void close_monitor(monitor_view *view) {
+  if (view->read_source) {
+    g_source_destroy(view->read_source);
+    g_clear_pointer(&view->read_source, g_source_unref);
+  }
   if (view->monitor) {
     cc_scout_close(view->monitor);
     view->monitor = NULL;
@@ -41,18 +45,17 @@ static void report_error(monitor_view *view, const char *message, int result) {
   g_free(text);
 }
 
-static gboolean read_events(gpointer userdata) {
-  monitor_view *view = userdata;
-  if (!view->monitor) {
-    return G_SOURCE_CONTINUE;
-  }
-
+static gboolean read_events(monitor_view *view) {
   GtkTextBuffer *buffer = gtk_text_view_get_buffer(view->feed);
   GString *lines = g_string_new(NULL);
-  for (int i = 0; i < 64; ++i) {
+  int i;
+  for (i = 0; i < 64; ++i) {
     cc_scout_event event;
     int result = cc_scout_read_event(view->monitor, &event);
-    if (result == -EAGAIN || result == -EINTR) {
+    if (result == -EINTR) {
+      continue;
+    }
+    if (result == -EAGAIN) {
       break;
     }
     if (result < 0) {
@@ -87,7 +90,85 @@ static gboolean read_events(gpointer userdata) {
     gtk_text_view_scroll_to_iter(view->feed, &end, 0.0, FALSE, 0.0, 0.0);
   }
   g_string_free(lines, TRUE);
-  return G_SOURCE_CONTINUE;
+  return i == 64;
+}
+
+typedef struct {
+  GSource source;
+  monitor_view *view;
+  struct pollfd *fds;
+  gpointer *tags;
+  unsigned int count;
+} midi_watch;
+
+static gboolean midi_watch_check(GSource *source) {
+  midi_watch *watch = (midi_watch *)source;
+  for (unsigned int i = 0; i < watch->count; ++i) {
+    if (g_source_query_unix_fd(source, watch->tags[i])) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean midi_watch_dispatch(GSource *source, GSourceFunc callback,
+                                    gpointer userdata) {
+  (void)callback;
+  (void)userdata;
+  midi_watch *watch = (midi_watch *)source;
+  monitor_view *view = watch->view;
+  gboolean buffered = g_source_get_ready_time(source) == 0;
+  g_source_set_ready_time(source, -1);
+  for (unsigned int i = 0; i < watch->count; ++i) {
+    watch->fds[i].revents = g_source_query_unix_fd(source, watch->tags[i]);
+  }
+  int flags = cc_scout_poll_revents(view->monitor, watch->fds, watch->count);
+  if (flags < 0 || (flags & (POLLERR | POLLHUP | POLLNVAL))) {
+    report_error(view, "Could not watch MIDI events.",
+                 flags < 0 ? flags : -EIO);
+    close_monitor(view);
+    return G_SOURCE_REMOVE;
+  }
+  if ((buffered || (flags & POLLIN)) && read_events(view)) {
+    g_source_set_ready_time(source, 0);
+  }
+  return view->monitor ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+}
+
+static void midi_watch_finalize(GSource *source) {
+  midi_watch *watch = (midi_watch *)source;
+  g_free(watch->tags);
+  g_free(watch->fds);
+}
+
+static int start_midi_watch(monitor_view *view) {
+  static GSourceFuncs funcs = {
+      .check = midi_watch_check,
+      .dispatch = midi_watch_dispatch,
+      .finalize = midi_watch_finalize,
+  };
+  int count = cc_scout_poll_descriptor_count(view->monitor);
+  if (count <= 0) {
+    return count < 0 ? count : -EIO;
+  }
+  GSource *source = g_source_new(&funcs, sizeof(midi_watch));
+  midi_watch *watch = (midi_watch *)source;
+  watch->view = view;
+  watch->fds = g_new0(struct pollfd, count);
+  int filled = cc_scout_poll_descriptors(view->monitor, watch->fds, count);
+  if (filled <= 0 || filled > count) {
+    g_source_unref(source);
+    return filled < 0 ? filled : -EIO;
+  }
+  watch->count = filled;
+  watch->tags = g_new(gpointer, filled);
+  for (unsigned int i = 0; i < watch->count; ++i) {
+    watch->tags[i] =
+        g_source_add_unix_fd(source, watch->fds[i].fd, watch->fds[i].events);
+  }
+  view->read_source = source;
+  g_source_attach(source, NULL);
+  return 0;
 }
 
 static void update_monitor(monitor_view *view) {
@@ -156,6 +237,9 @@ static void update_monitor(monitor_view *view) {
   g_variant_iter_init(&iter, ports);
   while (result >= 0 && g_variant_iter_next(&iter, "(yy)", &id, &port_id)) {
     result = cc_scout_subscribe(view->monitor, (cc_scout_address){id, port_id});
+  }
+  if (result >= 0) {
+    result = start_midi_watch(view);
   }
   if (result < 0) {
     report_error(view, "Could not start MIDI monitoring.", result);
@@ -245,7 +329,6 @@ static gboolean refresh_sources(gpointer userdata) {
 static void free_monitor_view(gpointer userdata) {
   monitor_view *view = userdata;
   g_source_remove(view->scan_timer);
-  g_source_remove(view->read_timer);
   close_monitor(view);
   g_clear_pointer(&view->ports, g_variant_unref);
   g_clear_pointer(&view->sources, g_variant_unref);
@@ -326,7 +409,6 @@ static void activate(GtkApplication *app, gpointer userdata) {
   // ponytail: poll for ports and events - upgrade when the core exposes ALSA
   // watches.
   monitor->scan_timer = g_timeout_add_seconds(1, refresh_sources, monitor);
-  monitor->read_timer = g_timeout_add(25, read_events, monitor);
   g_object_set_data_full(G_OBJECT(window), "monitor-view", monitor,
                          free_monitor_view);
   gtk_window_present(window);
