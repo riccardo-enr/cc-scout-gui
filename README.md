@@ -8,6 +8,8 @@ MIDI notes and control changes when the ALSA sequencer signals input readiness.
 ALSA sequencer -> CC Scout core -> GTK source list
 ```
 
+![CC Scout main window with knobs, pads and the raw feed](docs/img/main-window.png)
+
 ## Build and run
 
 On Ubuntu, install `build-essential cmake pkg-config libgtk-4-dev libadwaita-1-dev libasound2-dev libglib2.0-dev-bin libyaml-dev`.
